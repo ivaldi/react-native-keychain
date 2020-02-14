@@ -186,6 +186,7 @@ SecAccessControlCreateFlags accessControlValue(NSDictionary *options)
     NSError *aerr = nil;
     BOOL canAuthenticate = [[LAContext new] canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&aerr];
     if (aerr || !canAuthenticate) {
+      NSLog(@"[RNKeyChain] Cannot authenticate while insert data %@", aerr);
       return rejectWithError(reject, aerr);
     }
 
@@ -196,6 +197,7 @@ SecAccessControlCreateFlags accessControlValue(NSDictionary *options)
                                                                  &error);
 
     if (error) {
+      NSLog(@"[RNKeyChain] Error while insert data %@", aerr);
       return rejectWithError(reject, aerr);
     }
     mAttributes[(__bridge NSString *)kSecAttrAccessControl] = (__bridge id)sacRef;
@@ -215,13 +217,61 @@ SecAccessControlCreateFlags accessControlValue(NSDictionary *options)
     dispatch_async(dispatch_get_main_queue(), ^{
       if (osStatus != noErr && osStatus != errSecItemNotFound) {
         NSError *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:osStatus userInfo:nil];
+        NSLog(@"[RNKeyChain] Error while insert data %@", error);
         return rejectWithError(reject, error);
       } else {
+        NSLog(@"[RNKeyChain] Insert data success %@", osStatus);
         return resolve(@(YES));
       }
     });
   });
 }
+
+- (NSMutableDictionary *)newSearchDictionary:(NSString *)identifier service:(NSString *)serviceName {
+  NSMutableDictionary *searchDictionary = [[NSMutableDictionary alloc] init];
+
+  [searchDictionary setObject:(id)kSecClassGenericPassword forKey:(id)kSecClass];
+
+//  NSData *encodedIdentifier = [identifier dataUsingEncoding:NSUTF8StringEncoding];
+//  [searchDictionary setObject:identifier forKey:(id)kSecAttrGeneric];
+  [searchDictionary setObject:identifier forKey:(id)kSecAttrAccount];
+  [searchDictionary setObject:serviceName forKey:(id)kSecAttrService];
+
+  return searchDictionary;
+
+}
+
+- (NSData *)searchKeychainCopyMatching:(NSString *)identifier service:(NSString *)serviceName{
+  NSMutableDictionary *searchDictionary = [self newSearchDictionary:identifier service:serviceName];
+
+  // Add search attributes
+  [searchDictionary setObject:(id)kSecMatchLimitOne forKey:(id)kSecMatchLimit];
+  
+  // Add search return types
+  [searchDictionary setObject:(id)kCFBooleanTrue forKey:(id)kSecReturnData];
+
+  NSData *result = nil;
+  OSStatus status = SecItemCopyMatching((CFDictionaryRef)searchDictionary, (void *)&result);
+  
+  return result;
+}
+
+- (BOOL)updateKeychainValue:(NSString *)password forIdentifier:(NSString *)identifier service:(NSString *)serviceName{
+
+  NSMutableDictionary *searchDictionary = [self newSearchDictionary:identifier service:serviceName];
+  NSMutableDictionary *updateDictionary = [[NSMutableDictionary alloc] init];
+  NSData *passwordData = [password dataUsingEncoding:NSUTF8StringEncoding];
+  [updateDictionary setObject:passwordData forKey:(id)kSecValueData];
+
+  OSStatus status = SecItemUpdate((CFDictionaryRef)searchDictionary,
+                                  (CFDictionaryRef)updateDictionary);
+
+  if (status == errSecSuccess) {
+    return YES;
+  }
+  return NO;
+}
+
 
 - (OSStatus)deletePasswordsForService:(NSString *)service
 {
@@ -294,10 +344,23 @@ RCT_EXPORT_METHOD(setGenericPasswordForOptions:(NSDictionary *)options withUsern
     (__bridge NSString *)kSecAttrAccount: username,
     (__bridge NSString *)kSecValueData: [password dataUsingEncoding:NSUTF8StringEncoding]
   };
+  
+  NSMutableDictionary *searchDictionary = [self newSearchDictionary:username service:service];
+  NSMutableDictionary *updateDictionary = [[NSMutableDictionary alloc] init];
+  NSData *passwordData = [password dataUsingEncoding:NSUTF8StringEncoding];
+  [updateDictionary setObject:passwordData forKey:(id)kSecValueData];
 
-  [self deletePasswordsForService:service];
+  OSStatus status = SecItemUpdate((CFDictionaryRef)searchDictionary,
+                                  (CFDictionaryRef)updateDictionary);
 
-  [self insertKeychainEntry:attributes withOptions:options resolver:resolve rejecter:reject];
+  NSLog(@"[RNKeyChain] Update data %i", status);
+  if(status != 0){
+    NSLog(@"[RNKeyChain] Try to add data %i", status);
+    [self insertKeychainEntry:attributes withOptions:options resolver:resolve rejecter:reject];
+  }else{
+    return resolve(@(YES));
+  }
+
 }
 
 RCT_EXPORT_METHOD(getGenericPasswordForOptions:(NSDictionary *)options resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
@@ -324,17 +387,19 @@ RCT_EXPORT_METHOD(getGenericPasswordForOptions:(NSDictionary *)options resolver:
 
   if (osStatus != noErr && osStatus != errSecItemNotFound) {
     NSError *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:osStatus userInfo:nil];
+    NSLog(@"[RNKeyChain] Error: %@", error);
     return rejectWithError(reject, error);
   }
 
   found = (__bridge NSDictionary*)(foundTypeRef);
   if (!found) {
+    NSLog(@"[RNKeyChain] Data not found");
     return resolve(@(NO));
   }
-
   // Found
   NSString *username = (NSString *) [found objectForKey:(__bridge id)(kSecAttrAccount)];
   NSString *password = [[NSString alloc] initWithData:[found objectForKey:(__bridge id)(kSecValueData)] encoding:NSUTF8StringEncoding];
+  NSLog(@"[RNKeyChain] Data is found: %@", password);
 
   CFRelease(foundTypeRef);
   return resolve(@{
